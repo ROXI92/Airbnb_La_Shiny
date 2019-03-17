@@ -1,0 +1,286 @@
+---
+title: "Los Angeles Airbnb Resident Resources Analysis"
+author: "Gourp 13 Ke Li, Xinyue Yan, Ziche Huang, Mingjun Chen"
+date: "Aug 2018"
+output: pdf_document
+---
+## Overview
+This project is a group assignment of the MGTA451 Marketing course. Data used in this analysis is scrapped from Airbnb website, with information regarding to rent housing marke in the Great Los Angeles area. 
+
+This research aims to build a linear regression model, for house holders to get a suggested price based on the location and other attributes of their property.
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(readr)
+library(ggmap)
+library(ggplot2)
+library(VIM)
+library(shiny)
+
+la_18 <- read.csv('LA_18.csv',header=TRUE,sep=",")   
+
+la_filtered <- la_18 %>% select(id,host_since,host_response_time,host_response_rate,neighbourhood_cleansed,neighbourhood_group_cleansed,city,latitude,longitude,property_type,room_type,accommodates,bathrooms,bedrooms,price,security_deposit,cleaning_fee,number_of_reviews,review_scores_rating,cancellation_policy,reviews_per_month)
+
+```
+
+
+## I. Data cleaning
+```{r}
+aggr(la_filtered)
+la_omit <- la_filtered %>% filter(!is.na(review_scores_rating))  %>% filter(!is.na(bathrooms)) %>% filter(!is.na(bedrooms)) %>% filter(!is.na(price))
+```
+
+From the aggregation figure, we can see that except for the empty column held for neighbouhood group number, several housing related attributes are missing, but considering the fact that we do have a very large dataset, we decide to remove all the NAs. 
+
+```{r}
+la_omit %>% group_by(neighbourhood_cleansed) %>% count()  %>% arrange(desc(n)) 
+```
+
+From the above table, we can see the great Los Angeles is a combined of hundreds of neighbourhoods, to get a more clear view of the major market we filtered out those neighbourhoods where housing resources are more centered.(meaning more than 100 resource in that neighbourhood). 
+
+```{r, include= FALSE}
+centered_place <- la_omit %>% group_by(neighbourhood_cleansed) %>% count()  %>% arrange(desc(n)) %>% filter(n>=250)  
+
+centered_place_list <- centered_place$neighbourhood_cleansed
+
+la_main <- la_omit %>% filter(neighbourhood_cleansed  %in% centered_place_list) 
+
+```
+
+
+##II. Exploratory Data Analysis
+
+```{r}
+#num_of_reviews
+summary(la_main$number_of_reviews)
+ggplot(la_main,aes(x = number_of_reviews)) +
+  geom_histogram(aes(y=..density..),binwidth = 20,colour= 'black',fill='white')+
+  geom_density(alpha=0.5,fill= '3')+
+  ggtitle('Distribution of Review Numbers')+
+  xlab('review numbers')
+
+la_main <-la_main %>% filter(number_of_reviews >= 5)
+
+#rate
+summary(la_main$review_scores_rating)
+ggplot(la_main,aes( x = review_scores_rating))+
+  geom_histogram(aes(y=..density..),binwidth = 1,colour= 'black',fill='white')+
+  geom_density(alpha=0.5,fill= '3')+
+  ggtitle('Distribution of Rating Score')+
+  xlab('review score')+
+  xlim(67,102)
+#price
+summary(la_main$price)
+ggplot(la_main,aes( x = price))+
+  geom_histogram(aes(y=..density..),binwidth = 1,colour= 'black',fill='white')+
+  geom_density(alpha=0.5,fill= '3')+
+  ggtitle('Distribution of Price')+
+  xlab('price per night')+
+  xlim(0,500)
+
+#Neighbourhood distribution
+set.seed(20)
+clusters <- kmeans(la_main[,8:9],5)   ### define popular/unpopular   then fill???
+
+la_main$neighbourhood_group_cleansed <- as.factor(clusters$cluster)
+
+LAMap <- get_map("Los Angeles", zoom = 10)
+ggmap(LAMap) + 
+  ggtitle("Neighbourhood Distribution(using Kmeans)") +
+  geom_point(data = la_main,aes(x = longitude[], y = latitude[],colour = as.factor(neighbourhood_group_cleansed))) 
+
+#room type
+summary(la_main$room_type)
+ggplot(la_main,aes( x = factor(1), fill = factor(room_type)))+
+  geom_bar(width = 1)+
+  coord_polar(theta = 'y')+
+  ggtitle('Distribution of Room Type')+
+  scale_fill_brewer(palette = 7)
+
+#property type
+#summary(la_main$property_type)
+la_main %>% group_by(property_type) %>% count() %>% arrange(desc(n))
+```
+
+
+After exploring the dataset we are a little surprised to find that while some houses can achieve 700 reviews, most houses can hardly reach 10. More than 70% hosts provide private entire apts, and the "hot places" are aggregated in the northwest coner.
+
+
+##III. Build Regression Model
+
+```{r, include= FALSE}
+more_viewed <- la_main %>% filter(number_of_reviews > 14 & review_scores_rating >90  & price < 500) 
+less_viewed <- la_omit %>% filter(neighbourhood_cleansed  %in% centered_place_list)  %>% filter(number_of_reviews <= 5 & price < 500) 
+
+```
+
+We intend to build a linear regression model from some 'successful' housing sourses (those who achieved more reviews and high rating scores). Thus we filtered the data and are left with 9,000 'popular' housing sources, which is enough to generalize a representative model. 
+
+```{r}
+model_data <- more_viewed %>% select(neighbourhood_cleansed,property_type,room_type,accommodates,bathrooms,bedrooms,price,cancellation_policy)
+
+sample_data <- sample(2,nrow(model_data),replace=TRUE,prob=c(0.7,0.3))
+train_data <- model_data[sample_data==1,] #Train
+
+
+proptertylist <- train_data$property_type
+policylist <- train_data$cancellation_policy
+
+test_data <- model_data[sample_data==2,] #Test
+test_data <- test_data %>% filter(property_type %in% proptertylist)
+test_data <- test_data %>% filter(cancellation_policy %in% policylist)
+
+mod1 <- lm(data = train_data, price ~.,na.action=na.exclude) 
+
+```
+
+### Model Diagnostics
+```{r}
+#check risiduals distribution
+par(mfrow=c(2,2))
+plot(mod1)
+
+```
+
+
+### Prediction
+Now we can use the model generated above to make prediction(suggestion).
+```{r}
+predict_price <- predict(mod1,test_data)
+delta_price <-  predict_price - test_data$price
+
+summary(delta_price)
+hist(delta_price, main = "Prediction with test_data from popular group")
+```
+
+The delta-price distribution is centered around zero, indicating that the model can be trusted and can be generalized to the population.
+
+### Extension
+The model is generated from data of the 'popular' houses. Here we take a look at how it'll perform on the less popular houses:
+```{r}
+less_viewed_test <- less_viewed %>% select(neighbourhood_cleansed,property_type,room_type,accommodates,bathrooms,bedrooms,price,cancellation_policy)
+
+less_viewed_test <- less_viewed_test %>% filter(property_type %in% proptertylist)
+less_viewed_test <- less_viewed_test %>% filter(cancellation_policy %in% policylist)
+
+delta_price_2 <- predict(mod1,less_viewed_test)
+summary(delta_price_2)
+hist(delta_price_2, main = "Prediction with data from less popular group")
+```
+
+This distribution looks right skewed, and 80% of theses housing prices are above the predicted price. This might be interpreted as the price of these houses is somewhat causing their lower popularity.
+
+##IV. Build a shiny app
+### Define UI for application that plots features of movies 
+```{r}
+ui <- fluidPage(
+  
+  # Sidebar layout with a input and output definitions 
+  sidebarLayout(
+    
+    # Inputs
+    sidebarPanel(
+      
+      # Select variable for y-axis
+      selectInput(inputId = "y",
+                   label = "View:",
+                   choices = c("price","review_scores_rating"),
+                   selected = "price"),
+      # Select variable for x-axis
+      
+     selectInput(inputId = "x",
+                   label = "Group by:",
+                   choices = c("neighbourhood_cleansed","property_type"),
+                   selected = "neighbourhood_cleansed"),
+
+     
+     selectInput(inputId = "z", 
+                  label = "Color by:",
+                  choices = c("room_type","bathrooms","bedrooms"), 
+                  selected = "room_type"),
+     
+           
+      selectInput(inputId = "neighbourhood_cleansed", 
+                  label = "User-Neighbourhood:",
+                  choices = levels(train_data$neighbourhood_cleansed),
+                  selected = "Hollywood"),
+      
+     selectInput(inputId = "property_type", 
+                  label = "User-Property Type:",
+                  choices = levels(train_data$property_type), 
+                  selected = "Apartment"),
+     
+     selectInput(inputId = "room_type", 
+                  label = "User-Room Type:",
+                  choices = levels(train_data$room_type), 
+                  selected = "Private room"),
+     
+     selectInput(inputId = "accommodates", 
+                  label = "User-Accommodates:",
+                  choices = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16), 
+                  selected = 1),
+     
+     
+     selectInput(inputId = "bathrooms", 
+                  label = "User-Bathrooms:",
+                  choices = c(0,0.5,1,1.5,2,2.5,3,3.5,4,4.5,5,7), 
+                  selected = 1),
+     
+     selectInput(inputId = "bedrooms", 
+                  label = "User-Bedrooms:",
+                  choices = c(0,1,2,3,4,5,6,7,8),
+                 selected = 1),
+     
+     selectInput(inputId = "cancellation_policy", 
+                  label = "User-Cancellation policy:",
+                  choices = levels(train_data$cancellation_policy), 
+                  selected = "flexible")
+     ),     
+    
+    # Outputs
+    mainPanel(
+      plotOutput(outputId = "histplot"),
+      
+      h4("Suggested Price:"),
+      verbatimTextOutput(outputId = "value_recommendation")
+
+    )
+  )
+)
+
+```
+
+### Define server function required to create the scatterplot
+```{r}
+server <- function(input, output) {
+
+  # Create scatterplot object the plotOutput function is expecting
+  output$histplot <- renderPlot({
+    ggplot(data = more_viewed, aes_string(x = input$x, y = input$y, color = input$z)) +
+      geom_point() +
+       theme(axis.text.x = element_text( vjust = 0.5,   hjust = 0.5, angle = 90))
+  })
+ 
+  
+user_defined <- reactive({
+      data.frame(
+        neighbourhood_cleansed = req(input$neighbourhood_cleansed),
+        property_type = input$property_type,
+        room_type = input$room_type,
+        accommodates = as.integer(input$accommodates),
+        bathrooms = as.integer(input$bathrooms),
+        bedrooms = as.integer(input$bedrooms),
+       cancellation_policy= input$cancellation_policy)
+  })
+
+    output$value_recommendation <-  renderPrint(predict(mod1,user_defined())) 
+  
+}
+```
+
+### Create a Shiny app object
+```{r}
+
+shinyApp(ui = ui, server = server)
+
+```
